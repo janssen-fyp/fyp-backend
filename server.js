@@ -116,60 +116,109 @@ async function getOsrmRoutes(startCoord, endCoord) {
   });
 }
 
-async function resolveAutoCongestionMode() {
+async function getPredictionSummary(site = "6041", hours = "6") {
+  const response = await fetch(
+    `http://127.0.0.1:8002/predict?site=${site}&hours=${hours}`
+  );
+
+  if (!response.ok) {
+    throw new Error(`Prediction API failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  const predictionArray = Array.isArray(data.prediction)
+    ? data.prediction
+    : Array.isArray(data.predictions)
+    ? data.predictions
+    : [];
+
+  if (predictionArray.length === 0) {
+    throw new Error("Prediction array is empty.");
+  }
+
+  const yhatValues = predictionArray
+    .map((item) => Number(item.yhat))
+    .filter((value) => Number.isFinite(value));
+
+  if (yhatValues.length === 0) {
+    throw new Error("No valid yhat values found.");
+  }
+
+  const averageYhat =
+    yhatValues.reduce((sum, value) => sum + value, 0) / yhatValues.length;
+
+  const maxYhat = Math.max(...yhatValues);
+  const minYhat = Math.min(...yhatValues);
+
+  return {
+    site,
+    hours: Number(hours),
+    averageYhat,
+    maxYhat,
+    minYhat,
+    predictionCount: yhatValues.length,
+  };
+}
+
+function inferCongestionScenario(predictionSummary) {
+  const threshold = 700;
+  const severeThreshold = 900;
+
+  const avg = predictionSummary.averageYhat;
+
+  if (avg >= severeThreshold) {
+    return {
+      scenario: "high",
+      mode: "upper",
+      threshold,
+      severeThreshold,
+      reason: "Predicted traffic is significantly above the severe threshold.",
+    };
+  }
+
+  if (avg >= threshold) {
+    return {
+      scenario: "moderate",
+      mode: "upper",
+      threshold,
+      severeThreshold,
+      reason: "Predicted traffic is above the congestion threshold.",
+    };
+  }
+
+  return {
+    scenario: "low",
+    mode: "lower",
+    threshold,
+    severeThreshold,
+    reason: "Predicted traffic is below the congestion threshold.",
+  };
+}
+
+async function resolvePredictionInference(site = "6041", hours = "6") {
   try {
-    const site = "6041";
-    const hours = "6";
-
-    const response = await fetch(
-      `http://127.0.0.1:8002/predict?site=${site}&hours=${hours}`
-    );
-
-    if (!response.ok) {
-      throw new Error(`Prediction API failed with status ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    const predictionArray = Array.isArray(data.prediction)
-      ? data.prediction
-      : Array.isArray(data.predictions)
-      ? data.predictions
-      : [];
-
-    if (predictionArray.length === 0) {
-      throw new Error("Prediction array is empty.");
-    }
-
-    const yhatValues = predictionArray
-      .map((item) => Number(item.yhat))
-      .filter((value) => Number.isFinite(value));
-
-    if (yhatValues.length === 0) {
-      throw new Error("No valid yhat values found.");
-    }
-
-    const averageYhat =
-      yhatValues.reduce((sum, value) => sum + value, 0) / yhatValues.length;
-
-    const threshold = 700;
-    const resolvedMode = averageYhat >= threshold ? "upper" : "lower";
+    const predictionSummary = await getPredictionSummary(site, hours);
+    const inference = inferCongestionScenario(predictionSummary);
 
     return {
-      resolvedMode,
-      averageYhat,
-      threshold,
-      predictionCount: yhatValues.length,
+      ok: true,
+      predictionSummary,
+      inference,
     };
   } catch (error) {
-    console.error("Auto mode resolution error:", error.message);
+    console.error("Prediction inference error:", error.message);
 
     return {
-      resolvedMode: "normal",
-      averageYhat: null,
-      threshold: null,
-      predictionCount: 0,
-      fallback: true,
+      ok: false,
+      predictionSummary: null,
+      inference: {
+        scenario: "unknown",
+        mode: "normal",
+        threshold: 700,
+        severeThreshold: 900,
+        reason: "Prediction inference failed. Falling back to normal mode.",
+      },
       error: error.message,
     };
   }
@@ -274,26 +323,23 @@ app.post("/api/route", async (req, res) => {
     congestionMode = String(congestionMode || "normal").trim().toLowerCase();
 
     let effectiveCongestionMode = congestionMode;
-    let autoInfo = null;
+
+    const predictionInference = await resolvePredictionInference("6041", "6");
 
     if (congestionMode === "auto") {
-      autoInfo = await resolveAutoCongestionMode();
-      effectiveCongestionMode = autoInfo.resolvedMode;
-    }
-
-    // manual 模式下也尽量提供 prediction 信息，便于评分与展示
-    let predictionInfo = autoInfo;
-    if (!predictionInfo) {
-      predictionInfo = await resolveAutoCongestionMode();
+      effectiveCongestionMode = predictionInference.inference.mode;
     }
 
     const startCoord = await geocodePlace(start);
     const endCoord = await geocodePlace(destination);
 
+    // 🔥 必须有这句
     const routes = await getOsrmRoutes(startCoord, endCoord);
 
-    const averageYhat = Number.isFinite(predictionInfo?.averageYhat)
-      ? predictionInfo.averageYhat
+    const averageYhat = Number.isFinite(
+      predictionInference?.predictionSummary?.averageYhat
+    )
+      ? predictionInference.predictionSummary.averageYhat
       : null;
 
     const scoredRoutes = scoreRoutes(
@@ -310,8 +356,7 @@ app.post("/api/route", async (req, res) => {
       destination,
       requestedCongestionMode: congestionMode,
       effectiveCongestionMode,
-      autoInfo,
-      predictionInfo,
+      predictionInference,
       startCoord,
       endCoord,
       selectedRouteId: best.id,
@@ -337,7 +382,6 @@ app.post("/api/route", async (req, res) => {
     });
   }
 });
-
 app.listen(PORT, () => {
   console.log(`Backend running on http://127.0.0.1:${PORT}`);
 });
