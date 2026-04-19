@@ -4,6 +4,8 @@ const cors = require("cors");
 const app = express();
 const PORT = 5001;
 
+const db = require("./db");
+
 app.use(cors());
 app.use(express.json());
 
@@ -350,6 +352,40 @@ app.post("/api/route", async (req, res) => {
 
     const { best, ranked } = pickBestRoute(scoredRoutes);
 
+    const predictedTraffic = predictionInference?.predictionSummary?.averageYhat ?? null;
+    const thresholdValue = predictionInference?.inference?.threshold ?? null;
+    const congestionScenario = predictionInference?.inference?.scenario ?? null;
+
+    const insertDecision = db.prepare(`
+    INSERT INTO route_decisions (
+        start_location,
+        destination,
+        requested_mode,
+        effective_mode,
+        predicted_traffic,
+        threshold_value,
+        congestion_scenario,
+        alternatives_count,
+        selected_route_id,
+        distance,
+        duration
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    insertDecision.run(
+    start,
+    destination,
+    congestionMode,
+    effectiveCongestionMode,
+    predictedTraffic,
+    thresholdValue,
+    congestionScenario,
+    routes.length,
+    best.id,
+    best.distance,
+    best.duration
+    );
+
     return res.json({
       source: "nominatim-osrm-ai-selection",
       start,
@@ -382,6 +418,30 @@ app.post("/api/route", async (req, res) => {
     });
   }
 });
+
+app.get("/api/history", async (req, res) => {
+  try {
+    const rows = db
+      .prepare(`
+        SELECT *
+        FROM route_decisions
+        ORDER BY datetime(created_at) DESC
+        LIMIT 10
+      `)
+      .all();
+
+    return res.json({
+      items: rows,
+    });
+  } catch (error) {
+    console.error("Backend /api/history error:", error.message);
+    return res.status(500).json({
+      error: "Failed to fetch route history",
+      details: error.message,
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Backend running on http://127.0.0.1:${PORT}`);
 });
