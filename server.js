@@ -312,7 +312,7 @@ function pickBestRoute(scoredRoutes) {
 
 app.post("/api/route", async (req, res) => {
   try {
-    let { start, destination, congestionMode } = req.body;
+    let { start, destination, congestionMode, startCoords } = req.body;
 
     if (!start || !destination) {
       return res.status(400).json({
@@ -332,7 +332,17 @@ app.post("/api/route", async (req, res) => {
       effectiveCongestionMode = predictionInference.inference.mode;
     }
 
-    const startCoord = await geocodePlace(start);
+    const startCoord =
+        startCoords &&
+        Number.isFinite(Number(startCoords.lat)) &&
+        Number.isFinite(Number(startCoords.lon))
+            ? {
+                lat: Number(startCoords.lat),
+                lon: Number(startCoords.lon),
+                displayName: "Current Location",
+            }
+            : await geocodePlace(start);
+
     const endCoord = await geocodePlace(destination);
 
     // 🔥 必须有这句
